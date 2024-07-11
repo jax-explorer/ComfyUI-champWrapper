@@ -340,7 +340,7 @@ class champ_sampler:
     
     def split_images(self, images: Tensor, split_size: int) -> List[Tuple[Tensor, int]]:
         # 计算分割数量
-        num_splits = (images.size(0) + split_size - 1) # split_size
+        num_splits = (images.size(0) + split_size - 1) // split_size
         split_tensors = []
         
         for i in range(num_splits):
