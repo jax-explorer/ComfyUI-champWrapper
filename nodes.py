@@ -10,6 +10,10 @@ import torch.nn.functional as F
 from torchvision.transforms import ToPILImage
 from contextlib import nullcontext
 from omegaconf import OmegaConf
+from torch import Tensor
+from typing import List, Tuple
+
+
 
 from transformers import CLIPVisionModelWithProjection
 
@@ -294,6 +298,7 @@ class champ_sampler:
             "width": ("INT", {"default": 512, "min": 64, "max": 2048, "step": 64}),
             "height": ("INT", {"default": 512, "min": 64, "max": 2048, "step": 64}),
             "steps": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1}),
+            "context_length": ("INT", {"default": 30, "min": 1, "max": 200, "step": 1}),
             "guidance_scale": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 20.0, "step": 0.01}),
             "frames": ("INT", {"default": 16, "min": 1, "max": 100, "step": 1}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
@@ -329,8 +334,25 @@ class champ_sampler:
     FUNCTION = "process"
     CATEGORY = "champWrapper"
 
+    def merge(self, images_list: List[Tensor]):
+        all_images = torch.cat(images_list, dim=0)
+        return all_images, all_images.size(0)
+    
+    def split_images(self, images: Tensor, split_size: int) -> List[Tuple[Tensor, int]]:
+        # 计算分割数量
+        num_splits = (images.size(0) + split_size - 1) # split_size
+        split_tensors = []
+        
+        for i in range(num_splits):
+            start_index = i * split_size
+            end_index = start_index + split_size
+            split_tensor = images[start_index:end_index]
+            split_tensors.append((split_tensor, split_tensor.size(0)))
+    
+        return split_tensors
+
     def process(self, champ_model, champ_vae, champ_encoder, image, width, height, 
-                guidance_scale, steps, seed, keep_model_loaded, frames, latent_image, start_at_step, style_fidelity=1.0, depth_tensors=None, normal_tensors=None, semantic_tensors=None, dwpose_tensors=None, scheduler='DDIMScheduler'):
+                guidance_scale, steps, seed, keep_model_loaded, frames, latent_image, start_at_step, style_fidelity=1.0, depth_tensors=None, normal_tensors=None, semantic_tensors=None, dwpose_tensors=None, scheduler='DDIMScheduler', context_length=30):
         device = mm.get_torch_device()
         mm.unload_all_models()
         mm.soft_empty_cache()
@@ -401,41 +423,64 @@ class champ_sampler:
             to_pil = ToPILImage()
             ref_image_pil = to_pil(image[0])
 
-            guidance_tensor_batches = {}
-            if depth_tensors is not None:
-                guidance_tensor_batches["depth"] = depth_tensors
-            if normal_tensors is not None:
-                guidance_tensor_batches["normal"] = normal_tensors
-            if semantic_tensors is not None:
-                guidance_tensor_batches["semantic_map"] = semantic_tensors
-            if dwpose_tensors is not None:
-                guidance_tensor_batches["dwpose"] = dwpose_tensors
-                
-            guidance_pil_group, video_length = combine_guidance_data_from_tensors(guidance_tensor_batches)
+            split_size = context_length
 
-            result_video_tensor = inference(
-                cfg=cfg,
-                vae=vae,
-                image_enc=image_enc,
-                model=model,
-                scheduler=noise_scheduler,
-                ref_image_pil=ref_image_pil,
-                guidance_pil_group=guidance_pil_group,
-                video_length=frames,
-                width=width, height=height,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                start_at_step=start_at_step,
-                latent_image=latent_image,
-                style_fidelity=style_fidelity,
-                device=device, dtype=dtype
-            )  # (1, c, f, h, w)
-            
-            result_video_tensor = result_video_tensor.squeeze(0)
-            result_video_tensor = result_video_tensor.permute(1, 2, 3, 0).cpu()
+            # 将张量分割成批次
+            depth_batches = self.split_images(depth_tensors, split_size) if depth_tensors is not None else None
+            normal_batches = self.split_images(normal_tensors, split_size) if normal_tensors is not None else None
+            semantic_batches = self.split_images(semantic_tensors, split_size) if semantic_tensors is not None else None
+            dwpose_batches = self.split_images(dwpose_tensors, split_size) if dwpose_tensors is not None else None
+
+            result_video_tensors = []
+
+            for i in range(len(depth_batches)):  # 假设所有的batch数相同
+                guidance_tensor_batches = {}
+                if depth_batches is not None:
+                    guidance_tensor_batches["depth"] = depth_batches[i][0]
+                if normal_batches is not None:
+                    guidance_tensor_batches["normal"] = normal_batches[i][0]
+                if semantic_batches is not None:
+                    guidance_tensor_batches["semantic_map"] = semantic_batches[i][0]
+                if dwpose_batches is not None:
+                    guidance_tensor_batches["dwpose"] = dwpose_batches[i][0]
+                            
+                guidance_pil_group, video_length = combine_guidance_data_from_tensors(guidance_tensor_batches)
+
+                result_video_tensor = inference(
+                    cfg=cfg,
+                    vae=vae,
+                    image_enc=image_enc,
+                    model=model,
+                    scheduler=noise_scheduler,
+                    ref_image_pil=ref_image_pil,
+                    guidance_pil_group=guidance_pil_group,
+                    video_length=video_length,  # 使用实际的video_length
+                    width=width, height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    start_at_step=start_at_step,
+                    latent_image=latent_image,
+                    style_fidelity=style_fidelity,
+                    device=device, dtype=dtype
+                )  # (1, c, f, h, w)
+                
+                result_video_tensor = result_video_tensor.squeeze(0)
+                result_video_tensor = result_video_tensor.permute(1, 2, 3, 0).cpu()
+                result_video_tensors.append(result_video_tensor)
+
+            # 合并所有结果张量
+            final_result_video_tensor, _ = self.merge(result_video_tensors)
+
+
             if not keep_model_loaded:
                 model.to('cpu')
-            return (result_video_tensor,)
+            
+
+            return (final_result_video_tensor,)
+
+
+
+
 def inference(
     cfg,
     vae,
