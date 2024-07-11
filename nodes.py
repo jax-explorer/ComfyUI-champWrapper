@@ -436,13 +436,13 @@ class champ_sampler:
             for i in range(len(depth_batches)):  # 假设所有的batch数相同
                 guidance_tensor_batches = {}
                 if depth_batches is not None:
-                    guidance_tensor_batches["depth"] = depth_batches[i][0]
+                    guidance_tensor_batches["depth"] = depth_batches[i]
                 if normal_batches is not None:
-                    guidance_tensor_batches["normal"] = normal_batches[i][0]
+                    guidance_tensor_batches["normal"] = normal_batches[i]
                 if semantic_batches is not None:
-                    guidance_tensor_batches["semantic_map"] = semantic_batches[i][0]
+                    guidance_tensor_batches["semantic_map"] = semantic_batches[i]
                 if dwpose_batches is not None:
-                    guidance_tensor_batches["dwpose"] = dwpose_batches[i][0]
+                    guidance_tensor_batches["dwpose"] = dwpose_batches[i]
                             
                 guidance_pil_group, video_length = combine_guidance_data_from_tensors(guidance_tensor_batches)
 
